@@ -1,9 +1,7 @@
 processAllCha = function(folder, functionName, extension){
 	rawFileList = list.files(folder, recursive=T)
 	fileList = paste(ensureTrailingSlash(folder),rawFileList[grepl(extension, rawFileList)], sep='')	
-	childUsages = do.call('rbind', mclapply(fileList, function(x){processFile(x, functionName)}, mc.cores=detectCores()))
-	#childUsages = do.call('rbind', lapply(fileList, function(x){processFile(x, functionName)}))
-	
+	childUsages = do.call('rbind', mclapply(fileList, function(x){processFile(x, functionName)}, mc.cores=detectCores()))	
 	return(childUsages)
 }
 
@@ -11,7 +9,7 @@ processFile = function(inputFile, functionName){
 	startTime = Sys.time()
 	t1 = try({		
 		corpus = read.CLAN.file(inputFile)			
-		#print(paste('File Read:', Sys.time() - startTime))				
+		print(paste('File Read:', Sys.time() - startTime))				
 	})
 	if (inherits(t1, 'try-error')){
 		#write the df to a file
@@ -410,3 +408,172 @@ get_utt_info <- function(u){
 	myrow
 	
 } #END get_utt_info
+
+scrubGloss =  function(string){
+	#remove +\"
+	string = gsub('\\+','',string)
+	string = gsub(' \\?','?',string)
+	string = gsub('//','',string)
+	return(string)	
+}
+
+convertToCSV = function(infolder, outfolder,corpus){
+	corpusDir = paste(ensureTrailingSlash(infolder), ensureTrailingSlash(corpus), sep='')
+	potentialFileList = list.files(corpusDir, recursive=T)
+	fileList = potentialFileList[grep('.cha$',potentialFileList)]
+	outputDir = paste(ensureTrailingSlash(outfolder), ensureTrailingSlash(corpus), sep='')
+	dir.create(outputDir, showWarnings=F)
+	#lapply(fileList, function(f){
+	mclapply(fileList, function(f){
+		df = read.CLAN.file(paste(ensureTrailingSlash(infolder), ensureTrailingSlash(corpus), f, sep=''))
+		filename = gsub('.cha','.csv',paste(ensureTrailingSlash(outfolder), ensureTrailingSlash(corpus), gsub(ensureTrailingSlash(corpus), '', f), sep=''))			
+		dir.create(paste(head(strsplit(filename,'/')[[1]],-1), collapse='/'), showWarnings=F)			
+		df$child = gsub('[0123456789].*cha$','', tail(strsplit(df$Filename[1],'/')[[1]],1))
+write.csv(df[,c('Speaker',	'Verbatim',	'Gloss','Filename',	'Language',	'Corpus','Age',	'Gender',	'Utt.Number','child')], filename, row.names=F)	
+	}, mc.cores=detectCores())		
+	#})
+	
+	#merge all of the files into a single term
+	#system(paste('cat ', paste(outfolder, corpus,'/', sep=''), '*.csv > ', outfolder, corpus, '.csv', sep=''))
+	system(paste("find ",outputDir ," *.csv -exec cat {} \\; >> ", outfolder, corpus, '_temp.csv', sep=''))
+	system(paste('rm -r ',ensureTrailingSlash(outfolder), ensureTrailingSlash(corpus), sep=''))	
+	
+	#read back in and remove the final numeric token; also remove the header lines  
+
+	fullDataset = read.csv(paste(outfolder, corpus, '_temp.csv', sep=''), stringsAsFactors=F)	
+	system(paste('rm ',outfolder, corpus, '_temp.csv', sep=''))
+	
+	fullDataset$Gloss = unname(sapply(fullDataset$Gloss, function(x){
+		gsub('^ ', '',gsub(' $','', scrubGloss(gsub(' \025.*$', '',x))))	
+	}))
+	
+	fullDataset = fullDataset[-(which(is.na(as.numeric(fullDataset$Utt.Number)))),]	
+	
+	write.csv(fullDataset, paste(outfolder, corpus, '.csv', sep=''), row.names=F)
+			
+}
+
+getAgeInDays = function(filename){
+	elements = strsplit(filename,'/')[[1]]
+	pieces = as.numeric(strsplit(gsub('.cha', '', elements[length(elements)]), '-')[[1]])
+	if (length(pieces) != 3){stop('filenames should consist of 3 components')}
+	return(ceiling((pieces[1] * 12 *30.5) + (pieces[2]* 30.5) + pieces[3]))
+}
+
+augmentAndCleanThomasDataset = function(td){
+	td$child= 'Thomas' 
+	td$Age = unname(sapply(td$Filename, getAgeInDays))
+
+	#remove all of the ambiguous/ unknown @sc words, clean up the punctuation
+	td$Gloss = sapply(strsplit(td$Gloss, ' '), function(x){
+		paste(x[x!="a@p"], collapse=' ')
+	})
+	td$Gloss = gsub(' ,', ',', td$Gloss)
+	td$Gloss = gsub(',,', ',', td$Gloss)
+	td$Gloss = gsub('@o', '', td$Gloss)
+	td$Gloss = gsub('@p', '', td$Gloss)
+	td$Gloss = gsub('@f', '', td$Gloss)
+	td$Gloss = gsub('@c', '', td$Gloss)
+	td$Gloss = gsub(' \\.$', '', td$Gloss)
+	td$Gloss = gsub(' \\/$', '', td$Gloss)
+	td$Gloss = gsub("-'has", ' has', td$Gloss)
+	td$Gloss = gsub("-'had", ' had', td$Gloss)
+	td$Gloss = gsub("-'does", ' does', td$Gloss)
+	td$Gloss = gsub("0", '', td$Gloss)
+	td$Gloss= gsub('”','',td$Gloss)
+	td$Gloss= gsub('“','',td$Gloss)
+	td$Gloss = gsub('\x93', '',sapply(td$Gloss, function(x){iconv(x, "", "cp1252")} ))
+	td$Gloss = gsub('\x94', '',sapply(td$Gloss, function(x){iconv(x, "", "cp1252")} ))
+	td$Gloss = gsub('\025.*\025', '', td$Gloss)
+	return(td)
+}
+
+
+rejoinCHILDESdata = function(inputFolder, taggedFolder, outputFolder, datasetName, identifier){
+inputFile = paste(inputFolder, datasetName, '.csv', sep='')
+
+taggedFile = paste(taggedFolder, datasetName, '_tagged.txt', sep='')
+
+idf = read.csv(inputFile, stringsAsFactors=F)
+names(idf)
+
+tdf = read.delim(taggedFile, header=F, sep="\t", stringsAsFactors = F)
+names(tdf) = c('fileNameUttIndex','gloss','token')
+#need a method to deal with ^M
+#if (nrow(tdf) != as.numeric(strsplit(system(paste("wc -l ", taggedFile), intern=T), ' ')[[1]][3])){
+#	stop("length of indefinite csv read into R not the same as with wc")
+#}
+
+#parse out the essential properties of tdf for merging with the original input files 
+parsedID = strsplit(gsub('[\\(\\)]','',tdf$fileNameUttIndex), ',')
+tdf$Utt.number = sapply(parsedID, function(x){as.numeric(x[2])})
+tdf$filename = gsub("'",'',sapply(parsedID, function(x){as.character(x[1])}))
+
+parsedTokens = strsplit(tdf$token, ' ')
+parsedNouns = strsplit(sapply(parsedTokens, function(x){x[length(x)]}), '_')
+
+tdf$noun = sapply(parsedNouns, function(x){x[1]})
+tdf$pos = sapply(parsedNouns, function(x){x[2]})
+parsedModifiers = strsplit(sapply(parsedTokens, function(x){x[1]}), '_')
+tdf$numIntermediateWords = sapply(parsedTokens, function(x){length(x) -2})
+tdf$modifier = sapply(parsedModifiers, function(x){x[1]})
+tdf$relation = sapply(parsedModifiers, function(x){x[2]})
+tdf.nn = subset(tdf, pos %in% c('NN','NNP','NNS','NNPS'))
+
+taggedTokens  = merge(tdf.nn, idf, by.x=c('filename','Utt.number'), by.y=c('Filename','Utt.Number'))
+taggedTokens = taggedTokens[order(taggedTokens$filename, taggedTokens$Utt.number),] #this does need to be explicitly reordered after the merge
+if(nrow(tdf.nn) != nrow(taggedTokens)){stop('error with merge')}
+
+#thomas has a different age format, that must be retrieved from the filenames
+if(datasetName == 'Thomas'){
+	getAgeInDays = function(filename){
+		shortenedFilename = strsplit(filename,'/')[[1]][length(strsplit(filename,'/')[[1]])]		
+		pieces = as.numeric(strsplit(gsub('.cha', '', shortenedFilename), '-')[[1]])
+		if (length(pieces) != 3){stop('filenames should consist of 3 components')}
+		return(ceiling((pieces[1] * 12 *30.5) + (pieces[2]* 30.5) + pieces[3]))
+	}
+	taggedTokens$age = sapply(taggedTokens$filename, getAgeInDays)	
+} else {
+	taggedTokens$age = unname(sapply(taggedTokens$Age, ageToDays))
+}
+
+rdf = data.frame(modifier = taggedTokens$modifier, noun = taggedTokens$noun, pos = taggedTokens$pos, relation = taggedTokens$relation, speaker = taggedTokens$Speaker, 	age=taggedTokens$age, file= taggedTokens$filename, one =1, child=taggedTokens$child, det = taggedTokens$modifier, def= (taggedTokens$modifier == 'the'), numIntermediateWords = taggedTokens$numIntermediateWords, Utt.number = taggedTokens$Utt.number)
+
+#same checks as for Speechome on word identities
+#all words greater than length 2
+rdf = rdf[sapply(as.character(rdf$noun), nchar) > 2,]
+
+#no caps
+rdf = rdf[as.character(rdf$noun) == tolower(as.character(rdf$noun)),]
+
+outputFile = paste(outputFolder, datasetName,'_',identifier, '.csv', sep='')
+
+write.csv(rdf,outputFile, row.names=F)
+}
+
+getAggregate = function(df){
+  df$one = 1
+  names(df)[grep('noun', names(df))] = 'word'
+  nounUses = aggregate(one ~ word + speaker, df, sum)
+  parentalNouns = aggregate( one ~ word, subset(nounUses, speaker %in% c('MOT','FAT')), sum)
+  pCount = merge(subset(nounUses, speaker == 'CHI'), parentalNouns, by='word', all.x=T, all.y=T)[,c('word','one.y')]
+  names(pCount) =c('word','count')
+  pCount[is.na(pCount)] = 0
+  pCount = pCount[order(pCount$word),]  
+  return(pCount)
+}
+
+getAggCounts = function(inputFolder, inputCorpora, morphology, datasetName, outputFile){
+	possibleFiles = list.files(inputFolder)
+	files = possibleFiles[sapply(strsplit(possibleFiles,'_'), function(x){any(x %in% inputCorpora)})]
+	files = files[grep(morphology,files)]
+	files= files[grep(datasetName, files)]
+	
+	allDatasets = do.call('rbind.fill',lapply(files, function(file){
+	  read.csv(paste(inputFolder, file, sep=''), stringsAsFactors=F)	
+	}))
+  
+	allDatasets.agg = getAggregate(allDatasets)
+	
+	write.csv(allDatasets.agg, outputFile, row.names=F)
+}
